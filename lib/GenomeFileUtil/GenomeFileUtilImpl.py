@@ -47,9 +47,9 @@ class GenomeFileUtil:
     # state. A method could easily clobber the state set by another while
     # the latter method is running.
     ######################################### noqa
-    VERSION = "0.8.6"
+    VERSION = "0.8.9"
     GIT_URL = "https://github.com/kbaseapps/GenomeFileUtil.git"
-    GIT_COMMIT_HASH = "02c587de19839c8962d43b81e299bd9f712604bf"
+    GIT_COMMIT_HASH = "b13a53237bfcca6be182e83f3ae5e8b0fd150983"
 
     #BEGIN_CLASS_HEADER
     #END_CLASS_HEADER
@@ -460,46 +460,47 @@ class GenomeFileUtil:
            source as Source @metadata ws scientific_name as Name @metadata ws
            length(features) as Number of Protein Encoding Genes @metadata ws
            length(cdss) as Number of CDS @metadata ws assembly_ref as
-           Assembly Object @metadata ws num_contigs as Number contigs) ->
-           structure: parameter "id" of type "Genome_id" (KBase genome ID @id
-           kb), parameter "scientific_name" of String, parameter "domain" of
-           String, parameter "warnings" of list of String, parameter
-           "genome_tiers" of list of String, parameter "feature_counts" of
-           mapping from String to Long, parameter "genetic_code" of Long,
-           parameter "dna_size" of Long, parameter "num_contigs" of Long,
-           parameter "molecule_type" of String, parameter "contig_lengths" of
-           list of Long, parameter "contig_ids" of list of String, parameter
-           "source" of String, parameter "source_id" of type "source_id"
-           (Reference to a source_id @id external), parameter "md5" of
-           String, parameter "taxonomy" of String, parameter "gc_content" of
-           Double, parameter "publications" of list of type "publication"
-           (Structure for a publication (float pubmedid string source (ex.
-           Pubmed) string title string web address string  publication year
-           string authors string journal)) -> tuple of size 7: parameter
-           "pubmedid" of Double, parameter "source" of String, parameter
-           "title" of String, parameter "url" of String, parameter "year" of
-           String, parameter "authors" of String, parameter "journal" of
-           String, parameter "ontology_events" of list of type
-           "Ontology_event" (@optional ontology_ref method_version eco) ->
-           structure: parameter "id" of String, parameter "ontology_ref" of
-           type "Ontology_ref" (Reference to a ontology object @id ws
-           KBaseOntology.OntologyDictionary), parameter "method" of String,
-           parameter "method_version" of String, parameter "timestamp" of
-           String, parameter "eco" of String, parameter "ontologies_present"
-           of mapping from String to mapping from String to String, parameter
-           "features" of list of type "Feature" (Structure for a single CDS
-           encoding ???gene??? of a genome ONLY PUT GENES THAT HAVE A
-           CORRESPONDING CDS IN THIS ARRAY NOTE: Sequence is optional.
-           Ideally we can keep it in here, but Recognize due to space
-           constraints another solution may be needed. We may want to add
-           additional fields for other CDM functions (e.g., atomic regulons,
-           coexpressed fids, co_occurring fids,...)
-           protein_translation_length and protein_translation are for longest
-           coded protein (representative protein for splice variants) NOTE:
-           New Aliases field definitely breaks compatibility. As Does
-           Function. flags are flag fields in GenBank format. This will be a
-           controlled vocabulary. Initially Acceptable values are pseudo,
-           ribosomal_slippage, and trans_splicing Md5 is the md5 of
+           Assembly Object @metadata ws num_contigs as Number contigs
+           @metadata ws length(warnings) as Number of Genome Level Warnings
+           @metadata ws suspect as Suspect Genome) -> structure: parameter
+           "id" of type "Genome_id" (KBase genome ID @id kb), parameter
+           "scientific_name" of String, parameter "domain" of String,
+           parameter "warnings" of list of String, parameter "genome_tiers"
+           of list of String, parameter "feature_counts" of mapping from
+           String to Long, parameter "genetic_code" of Long, parameter
+           "dna_size" of Long, parameter "num_contigs" of Long, parameter
+           "molecule_type" of String, parameter "contig_lengths" of list of
+           Long, parameter "contig_ids" of list of String, parameter "source"
+           of String, parameter "source_id" of type "source_id" (Reference to
+           a source_id @id external), parameter "md5" of String, parameter
+           "taxonomy" of String, parameter "gc_content" of Double, parameter
+           "publications" of list of type "publication" (Structure for a
+           publication (float pubmedid string source (ex. Pubmed) string
+           title string web address string  publication year string authors
+           string journal)) -> tuple of size 7: parameter "pubmedid" of
+           Double, parameter "source" of String, parameter "title" of String,
+           parameter "url" of String, parameter "year" of String, parameter
+           "authors" of String, parameter "journal" of String, parameter
+           "ontology_events" of list of type "Ontology_event" (@optional
+           ontology_ref method_version eco) -> structure: parameter "id" of
+           String, parameter "ontology_ref" of type "Ontology_ref" (Reference
+           to a ontology object @id ws KBaseOntology.OntologyDictionary),
+           parameter "method" of String, parameter "method_version" of
+           String, parameter "timestamp" of String, parameter "eco" of
+           String, parameter "ontologies_present" of mapping from String to
+           mapping from String to String, parameter "features" of list of
+           type "Feature" (Structure for a single CDS encoding ???gene??? of
+           a genome ONLY PUT GENES THAT HAVE A CORRESPONDING CDS IN THIS
+           ARRAY NOTE: Sequence is optional. Ideally we can keep it in here,
+           but Recognize due to space constraints another solution may be
+           needed. We may want to add additional fields for other CDM
+           functions (e.g., atomic regulons, coexpressed fids, co_occurring
+           fids,...) protein_translation_length and protein_translation are
+           for longest coded protein (representative protein for splice
+           variants) NOTE: New Aliases field definitely breaks compatibility.
+           As Does Function. flags are flag fields in GenBank format. This
+           will be a controlled vocabulary. Initially Acceptable values are
+           pseudo, ribosomal_slippage, and trans_splicing Md5 is the md5 of
            dna_sequence. @optional functions ontology_terms note
            protein_translation mrnas flags warnings @optional inference_data
            dna_sequence aliases db_xrefs children functional_descriptions) ->
