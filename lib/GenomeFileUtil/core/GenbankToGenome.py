@@ -1,8 +1,6 @@
-
 import copy
 import datetime
 import hashlib
-import json
 import os
 import re
 import shutil
@@ -58,7 +56,7 @@ class GenbankToGenome:
         self.genome_suspect = False
         self.defects = Counter()
         self.spoofed_genes = 0
-        self.excluded_features = ('source', 'exon')
+        self.excluded_features = ('source', 'exon', 'fasta_record')
         self.ont_mappings = load_ontology_mappings('/kb/module/data')
         self.code_table = 11
         self.default_params = {
@@ -111,7 +109,7 @@ class GenbankToGenome:
         # THAT FAILS TYPESPEC CHECKING - THIS ALLOW YOU TO LOOK AT THE JSON BEFORE SAVED:
         # Turn this on :
         #  1) uncomment the TWO LINES for json printing lines below the ###
-        #  2) move skip/utility_test/problem_genome_test.py into the test dir 
+        #  2) move skip/utility_test/problem_genome_test.py into the test dir
         #  3) change the file location in the test_problem_genome_for_json test
         #  4) add your test file to the test/data dir
         #  5) run kb-sdk test as normal
@@ -262,8 +260,10 @@ class GenbankToGenome:
         for record in contigs:
             r_annot = record.annotations
             self.log("parsing contig: " + record.id)
-            if 'date' in r_annot:
-                dates.append(time.strptime(r_annot['date'], "%d-%b-%Y"))
+            try:
+                dates.append(time.strptime(r_annot.get('date'), "%d-%b-%Y"))
+            except (TypeError, ValueError):
+                pass
             genome['contig_ids'].append(record.id)
             genome['contig_lengths'].append(len(record))
             genome["publications"] |= self._get_pubs(r_annot)
@@ -379,7 +379,7 @@ class GenbankToGenome:
             if len(unmatched_ids) > 0:
                 raise ValueError(warnings['assembly_ref_extra_contigs'].format(", ".join(unmatched_ids)))
             if len(unmatched_ids_md5s) > 0:
-                raise ValueError(warnings["assembly_ref_diff_seq"].format(", ".join(unmatched_ids_md5s)))                
+                raise ValueError(warnings["assembly_ref_diff_seq"].format(", ".join(unmatched_ids_md5s)))
             self.log("Using supplied assembly: {}".format(assembly_ref))
             return assembly_ref
         self.log("Saving sequence as Assembly object")
@@ -400,7 +400,7 @@ class GenbankToGenome:
         files = os.listdir(os.path.abspath(input_directory))
         self.log("Genbank Files : " + ", ".join(files))
         genbank_files = [x for x in files if
-                         os.path.splitext(x)[-1] in valid_extensions]
+                         os.path.splitext(x)[-1].lower() in valid_extensions]
 
         if len(genbank_files) == 0:
             raise Exception(
