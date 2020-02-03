@@ -1,9 +1,8 @@
 import hashlib
 import json
+import logging
 import os
-import re
 import sys
-import time
 from collections import defaultdict
 
 import requests
@@ -12,15 +11,10 @@ from GenomeFileUtil.authclient import KBaseAuth as _KBaseAuth
 from installed_clients.AbstractHandleClient import AbstractHandle as HandleService
 from installed_clients.AssemblySequenceAPIServiceClient import AssemblySequenceAPI
 from installed_clients.DataFileUtilClient import DataFileUtil
-from installed_clients.KBaseSearchEngineClient import KBaseSearchEngine
 from installed_clients.WSLargeDataIOClient import WsLargeDataIO
+from GenomeFileUtil.core import GenomeUtils
 
 MAX_GENOME_SIZE = 2**30
-
-
-def log(message, prefix_newline=False):
-    time_str = time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(time.time()))
-    print(('\n' if prefix_newline else '') + time_str + ': ' + message)
 
 
 class GenomeInterface:
@@ -31,10 +25,9 @@ class GenomeInterface:
         self.token = config.token
         self.auth_service_url = config.authServiceUrl
         self.callback_url = config.callbackURL
-
+        self.re_api_url = config.re_api_url
         self.auth_client = _KBaseAuth(self.auth_service_url)
         self.dfu = DataFileUtil(self.callback_url)
-        self.kbse = KBaseSearchEngine(config.raw['search-url'])
         self.taxon_wsname = config.raw['taxon-workspace-name']
         self.scratch = config.raw['scratch']
         self.ws_large_data = WsLargeDataIO(self.callback_url)
@@ -45,9 +38,7 @@ class GenomeInterface:
         _validate_save_one_genome_params:
                 validates params passed to save_one_genome method
         """
-
-        log('start validating save_one_genome params')
-
+        logging.info('start validating save_one_genome params')
         # check for required parameters
         for p in ['workspace', 'name', 'data']:
             if p not in params:
@@ -58,15 +49,14 @@ class GenomeInterface:
         """
         _check_shock_response: check shock node response (Copied from DataFileUtil)
         """
-        log('start checking shock response')
+        logging.info('start checking shock response')
 
         if not response.ok:
             try:
                 err = json.loads(response.content)['error'][0]
-            except:
+            except Exception:
                 # this means shock is down or not responding.
-                self.log("Couldn't parse response error content from Shock: " +
-                         response.content)
+                logging.error("Couldn't parse response error content from Shock: " + response.content)
                 response.raise_for_status()
             raise ValueError(errtxt + str(err))
 
@@ -75,7 +65,7 @@ class GenomeInterface:
         _own_handle: check that handle_property point to shock nodes owned by calling user
         """
 
-        log('start checking handle {} ownership'.format(handle_property))
+        logging.info('start checking handle {} ownership'.format(handle_property))
 
         if handle_property in genome_data:
             handle_id = genome_data[handle_property]
@@ -94,7 +84,7 @@ class GenomeInterface:
             user_id = self.auth_client.get_user(self.token)
 
             if owner != user_id:
-                log('start copying node to owner: {}'.format(user_id))
+                logging.info('start copying node to owner: {}'.format(user_id))
                 dfu_shock = self.dfu.copy_shock_node({'shock_id': shock_id,
                                                       'make_handle': True})
                 handle_id = dfu_shock['handle']['hid']
@@ -104,7 +94,7 @@ class GenomeInterface:
         """
         _check_dna_sequence_in_features: check dna sequence in each feature
         """
-        log('start checking dna sequence in each feature')
+        logging.info('start checking dna sequence in each feature')
 
         if 'features' in genome:
             features_to_work = {}
@@ -131,41 +121,43 @@ class GenomeInterface:
 
     def get_one_genome(self, params):
         """Fetch a genome using WSLargeDataIO and return it as a python dict"""
-        log('fetching genome object')
+        logging.info('fetching genome object')
 
         res = self.ws_large_data.get_objects(params)['data'][0]
         data = json.load(open(res['data_json_file']))
         return data, res['info']
-        #return self.dfu.get_objects(params)['data'][0]
+        # return self.dfu.get_objects(params)['data'][0]
 
     def save_one_genome(self, params):
-        log('start saving genome object')
-
+        logging.info('start saving genome object')
         self._validate_save_one_genome_params(params)
-
         workspace = params['workspace']
         name = params['name']
         data = params['data']
-        if 'meta' in params and params['meta']:
-            meta = params['meta']
+        # XXX there is no `workspace_datatype` param in the spec
+        ws_datatype = params.get('workspace_datatype', "KBaseGenomes.Genome")
+        # XXX there is no `meta` param in the spec
+        meta = params.get('meta', {})
+        if "AnnotatedMetagenomeAssembly" in ws_datatype:
+            if params.get('upgrade') or 'feature_counts' not in data:
+                data = self._update_metagenome(data)
         else:
-            meta = {}
-        if params.get('upgrade') or 'feature_counts' not in data:
-            data = self._update_genome(data)
+            if params.get('upgrade') or 'feature_counts' not in data:
+                data = self._update_genome(data)
 
         # check all handles point to shock nodes owned by calling user
         self._own_handle(data, 'genbank_handle_ref')
         self._own_handle(data, 'gff_handle_ref')
+        if "AnnotatedMetagenomeAssembly" not in ws_datatype:
+            self._check_dna_sequence_in_features(data)
+            data['warnings'] = self.validate_genome(data)
 
-        self._check_dna_sequence_in_features(data)
-        data['warnings'] = self.validate_genome(data)
-
+        # sort data
+        data = GenomeUtils.sort_dict(data)
         # dump genome to scratch for upload
         data_path = os.path.join(self.scratch, name + ".json")
         json.dump(data, open(data_path, 'w'))
-
-        if 'hidden' in params and str(params['hidden']).lower() in (
-        'yes', 'true', 't', '1'):
+        if 'hidden' in params and str(params['hidden']).lower() in ('yes', 'true', 't', '1'):
             hidden = 1
         else:
             hidden = 0
@@ -176,87 +168,14 @@ class GenomeInterface:
             workspace_id = self.dfu.ws_name_to_id(workspace)
 
         save_params = {'id': workspace_id,
-                       'objects': [{'type': 'KBaseGenomes.Genome',
+                       'objects': [{'type': ws_datatype,
                                     'data_json_file': data_path,
                                     'name': name,
                                     'meta': meta,
                                     'hidden': hidden}]}
-
         dfu_oi = self.ws_large_data.save_objects(save_params)[0]
-
         returnVal = {'info': dfu_oi, 'warnings': data['warnings']}
-
         return returnVal
-
-    def old_retrieve_taxon(self, taxon_wsname, scientific_name):
-        """
-        old_retrieve_taxon: use SOLR to retrieve taxonomy and taxon_reference
-
-        """
-        default = ('Unconfirmed Organism: ' + scientific_name,
-                   'ReferenceTaxons/unknown_taxon', 'Unknown', 11)
-        solr_url = 'http://kbase.us/internal/solr-ci/search/'
-        solr_core = 'taxonomy_ci'
-        query = '/select?q=scientific_name:"{}"&fl=scientific_name%2Cscientific_lineage%2Ctaxonomy_id%2Cdomain%2Cgenetic_code&rows=5&wt=json'
-        match = re.match("\S+\s?\S*", scientific_name)
-        if not match:
-            return default
-        res = requests.get(solr_url + solr_core + query.format(match.group(0)))
-        results = res.json()['response']['docs']
-        if not results:
-            return default
-        taxonomy = results[0]['scientific_lineage']
-        taxon_reference = '{}/{}_taxon'.format(
-            taxon_wsname, results[0]['taxonomy_id'])
-        domain = results[0]['domain']
-        genetic_code = results[0]['genetic_code']
-
-        return taxonomy, taxon_reference, domain, genetic_code
-
-    def retrieve_taxon(self, taxon_wsname, scientific_name):
-        """
-        _retrieve_taxon: retrieve taxonomy and taxon_reference
-
-        """
-        default = ('Unconfirmed Organism: ' + scientific_name,
-                   'ReferenceTaxons/unknown_taxon', 'Unknown', 11)
-
-        def extract_values(search_obj):
-            return (search_obj['data']['scientific_lineage'],
-                    taxon_wsname+"/"+search_obj['object_name'],
-                    search_obj['data']['domain'],
-                    search_obj['data'].get('genetic_code', 11))
-
-        search_params = {
-            "object_types": ["taxon"],
-            "match_filter": {
-                "lookup_in_keys": {
-                    "scientific_name": {"value": scientific_name}},
-                "exclude_subobjects": 1
-            },
-            "access_filter": {
-                "with_private": 0,
-                "with_public": 1
-            },
-            "sorting_rules": [{
-                "is_object_property": 0,
-                "property": "timestamp",
-                "ascending": 0
-            }]
-        }
-        objects = self.kbse.search_objects(search_params)['objects']
-        if len(objects):
-            if len(objects) > 100000:
-                raise RuntimeError("Too many matching taxons returned for {}. "
-                                   "Potential issue with searchAPI.".format(scientific_name))
-            return extract_values(objects[0])
-        search_params['match_filter']['lookup_in_keys'] = {
-            "aliases": {"value": scientific_name}
-        }
-        objects = self.kbse.search_objects(search_params)['objects']
-        if len(objects):
-            return extract_values(objects[0])
-        return default
 
     @staticmethod
     def determine_tier(source):
@@ -284,35 +203,32 @@ class GenomeInterface:
             return "Ensembl", ['Representative', 'ExternalDB']
         return source, ['User']
 
+    def _update_metagenome(self, genome):
+        """Checks for missing required fields and fixes breaking changes"""
+        if 'molecule_type' not in genome:
+            genome['molecule_type'] = 'Unknown'
+
     def _update_genome(self, genome):
         """Checks for missing required fields and fixes breaking changes"""
         # do top level updates
-        ontologies_present = defaultdict(dict)
+        ontologies_present = defaultdict(dict)  # type: dict
         ontologies_present.update(genome.get('ontologies_present', {}))
         ontology_events = genome.get('ontology_events', [])
-        if 'genome_tier' not in genome:
-            genome['source'], genome['genome_tiers'] = self.determine_tier(
-                genome['source'])
+        # NOTE: 'genome_tiers' not in Metagenome spec
+        if 'genome_tiers' not in genome:
+            genome['source'], genome['genome_tiers'] = self.determine_tier(genome['source'])
         if 'molecule_type' not in genome:
             genome['molecule_type'] = 'Unknown'
-        if 'taxon_ref' not in genome:
-            genome['taxonomy'], genome['taxon_ref'], domain, genetic_code = self.retrieve_taxon(
-                self.taxon_wsname, genome['scientific_name'])
 
-            if 'genetic_code' in genome and genome['genetic_code'] != genetic_code:
-                genome['warnings'] = genome.get('warnings', []) + [
-                    "The genetic_code of this genome differs from that of its assigned taxon"]
-            else:
-                genome['genetic_code'] = genetic_code
+        # If an NCBI taxonomy ID is provided, fetch additional data about the taxon
+        # NOTE: Metagenome object does not have a 'taxon_assignments' field
+        if 'taxon_assignments' in genome and genome['taxon_assignments'].get('ncbi'):
+            tax_id = int(genome['taxon_assignments']['ncbi'])
+            GenomeUtils.set_taxon_data(tax_id, self.re_api_url, genome)
+        else:
+            GenomeUtils.set_default_taxon_data(genome)
 
-            if 'domain' in genome and genome['domain'] != domain:
-                genome['warnings'] = genome.get('warnings', []) + [
-                    "The domain of this genome differs from that of its assigned taxon"]
-            else:
-                genome['domain'] = domain
-
-        if any([x not in genome for x in ('dna_size', 'md5', 'gc_content',
-                                          'num_contigs')]):
+        if any([x not in genome for x in ('dna_size', 'md5', 'gc_content', 'num_contigs')]):
             if 'assembly_ref' in genome:
                 assembly_data = self.dfu.get_objects(
                     {'object_refs': [genome['assembly_ref']],
@@ -335,6 +251,7 @@ class GenomeInterface:
                 genome["md5"] = contig_data['md5']
                 genome["num_contigs"] = len(contig_data['contigs'])
 
+        # NOTE: metagenomes do not have the following fields
         if 'cdss' not in genome:
             genome['cdss'] = []
         if 'mrnas' not in genome:
@@ -393,6 +310,7 @@ class GenomeInterface:
                 if field == 'features':
                     if feat.get('type', 'gene') == 'gene':
                         if not feat.get('cdss', []):
+                            type_counts['non_coding_genes'] += 1
                             genome['non_coding_features'].append(feat)
                         else:
                             retained_features.append(feat)
@@ -417,7 +335,6 @@ class GenomeInterface:
         type_counts['non_coding_features'] = len(
             genome.get('non_coding_features', []))
         genome['feature_counts'] = type_counts
-
         return genome
 
     @staticmethod
@@ -426,32 +343,25 @@ class GenomeInterface:
         Run a series of checks on the genome object and return any warnings
         """
 
-        def _get_size(obj):
-            return sys.getsizeof(json.dumps(obj))
-
-        def sizeof_fmt(num):
-            for unit in ['', 'Ki', 'Mi', 'Gi', 'Ti', 'Pi', 'Ei', 'Zi']:
-                if abs(num) < 1024.0:
-                    return "%3.1f %sB" % (num, unit)
-                num /= 1024.0
-            return "%.1f %sB" % (num, 'Yi')
-
         allowed_tiers = {'Representative', 'Reference', 'ExternalDB', 'User'}
 
-        log('Validating genome object contents')
+        logging.info('Validating genome object contents')
         warnings = g.get('warnings', [])
 
+        # TODO: Determine whether these checks make any sense for Metagenome
+        #       object. Looks like many don't.
+        #       Add validations for Metagenome object
+
         # this will fire for some annotation methods like PROKKA
-        if g['domain'] == "Bacteria" and len(g.get('cdss', [])) != len(
-                g['features']):
+        if g.get('domain') == "Bacteria" and len(g.get('cdss', [])) != len(g['features']):
             warnings.append("For prokaryotes, CDS array should generally be the"
                             " same length as the Features array.")
 
-        if g['domain'] == "Eukaryota" and len(g.get('features', [])) == len(g.get('cdss', [])):
+        if g.get('domain') == "Eukaryota" and len(g.get('features', [])) == len(g.get('cdss', [])):
             warnings.append("For Eukaryotes, CDS array should not be the same "
                             "length as the Features array due to RNA splicing.")
 
-        if "molecule_type" in g and g['molecule_type'] not in {"DNA", 'ds-DNA'}:
+        if g.get('molecule_type') not in {"DNA", 'ds-DNA'}:
             if g.get('domain', '') not in {'Virus', 'Viroid'} and \
                             g['molecule_type'] not in {"DNA", 'ds-DNA'}:
                 warnings.append("Genome molecule_type {} is not expected "
@@ -461,40 +371,63 @@ class GenomeInterface:
         if "genome_tiers" in g and set(g['genome_tiers']) - allowed_tiers:
             warnings.append("Undefined terms in genome_tiers: " + ", ".join(
                 set(g['genome_tiers']) - allowed_tiers))
-        if g['taxon_ref'] == "ReferenceTaxons/unknown_taxon":
+        assignments = g.get('taxon_assignments', {})
+        if 'ncbi' not in assignments or (
+                'taxon_ref' in g and g['taxon_ref'] == "ReferenceTaxons/unknown_taxon"):
             warnings.append('Unable to determine organism taxonomy')
 
-        #MAX_GENOME_SIZE = 1 #300000000 # UNCOMMENT TO TEST FAILURE MODE. Set to size needed
-        feature_lists = ('mrnas', 'features', 'non_coding_features','cdss')
+        GenomeInterface.handle_large_genomes(g)
+        return warnings
+
+    @staticmethod
+    def handle_large_genomes(g):
+        """Determines the size of various feature arrays and starts removing the dna_sequence if
+        the genome is getting too big to store in the workspace"""
+        def _get_size(obj):
+            return sys.getsizeof(json.dumps(obj))
+
+        # seems pretty uneccessary...
+        def sizeof_fmt(num):
+            for unit in ['', 'Ki', 'Mi', 'Gi', 'Ti', 'Pi', 'Ei', 'Zi']:
+                if abs(num) < 1024.0:
+                    return "%3.1f %sB" % (num, unit)
+                num /= 1024.0
+            return "%.1f %sB" % (num, 'Yi')
+
+        feature_lists = ('mrnas', 'features', 'non_coding_features', 'cdss')
         master_key_sizes = dict()
-        # Change want full breakdown to True if want to see break down of sizes. 
-        # By making this a changebale flag it will run faster for standard uploads.
+        # Change want full breakdown to True if want to see break down of sizes.
+        # By making this a changeable flag it will run faster for standard uploads.
         want_full_breakdown = False
         for x in feature_lists:
             if x in g:
-                need_to_remove_dna_sequence = _get_size(g) > MAX_GENOME_SIZE                
+                need_to_remove_dna_sequence = _get_size(g) > MAX_GENOME_SIZE
                 if need_to_remove_dna_sequence or want_full_breakdown:
                     feature_type_dict_keys = dict()
                     for feature in g[x]:
                         for feature_key in list(feature.keys()):
                             if feature_key == "dna_sequence" and need_to_remove_dna_sequence:
-                                del(feature["dna_sequence"])
+                                # NOTE: should this get stored somewhere?
+                                del (feature["dna_sequence"])
                             else:
                                 if feature_key not in feature_type_dict_keys:
                                     feature_type_dict_keys[feature_key] = 0
-                                feature_type_dict_keys[feature_key] += sys.getsizeof(feature[feature_key])
+                                feature_type_dict_keys[feature_key] += sys.getsizeof(
+                                    feature[feature_key])
                     for feature_key in feature_type_dict_keys:
-                        feature_type_dict_keys[feature_key] = sizeof_fmt(feature_type_dict_keys[feature_key])
-                    master_key_sizes[x] = feature_type_dict_keys                
-                print("{}: {}".format(x, sizeof_fmt(_get_size(g[x]))))
+                        feature_type_dict_keys[feature_key] = sizeof_fmt(
+                            feature_type_dict_keys[feature_key])
+                    master_key_sizes[x] = feature_type_dict_keys
+                print(f"{x}: {sizeof_fmt(_get_size(g[x]))}")
         total_size = _get_size(g)
-        print("Total size {} ".format(sizeof_fmt(total_size)))
+        print(f"Total size {sizeof_fmt(total_size)} ")
         if want_full_breakdown:
-            print("Here is the breakdown of the sizes of feature lists elements : {}".format(str(master_key_sizes)))         
-        if total_size > MAX_GENOME_SIZE:            
-            print("Here is the breakdown of the sizes of feature lists elements : {}".format(str(master_key_sizes)))         
-            raise ValueError("This genome size of {} exceeds the maximum permitted size of {}.\nHere "
-                             "is the breakdown for feature lists and their respective sizes:\n{}"
-                             .format(sizeof_fmt(total_size),sizeof_fmt(MAX_GENOME_SIZE),
-                                     str(master_key_sizes)))
-        return warnings
+            print(f"Here is the breakdown of the sizes of feature lists elements : "
+                  f"{str(master_key_sizes)}")
+        if total_size > MAX_GENOME_SIZE:
+            print(f"Here is the breakdown of the sizes of feature lists elements : "
+                  f"{str(master_key_sizes)}")
+            raise ValueError(f"This genome size of {sizeof_fmt(total_size)} exceeds the maximum "
+                             f"permitted size of {sizeof_fmt(MAX_GENOME_SIZE)}.\n"
+                             f"Here is the breakdown for feature lists and their respective "
+                             f"sizes:\n{master_key_sizes}")

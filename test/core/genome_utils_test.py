@@ -14,7 +14,7 @@ class GenomeFileUtilTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        logging.basicConfig(level=logging.info)
+        logging.basicConfig(level=logging.INFO)
         token = environ.get('KB_AUTH_TOKEN', None)
         # WARNING: don't call any logging methods on the context object,
         # it'll result in a NoneType error
@@ -42,21 +42,6 @@ class GenomeFileUtilTest(unittest.TestCase):
     def tearDownClass(cls):
         pass
 
-    def test_retreve_taxon(self):
-        self.assertEqual(self.genome_interface.retrieve_taxon("meh", "Arabidopsis thaliana"),
-                         ('cellular organisms; Eukaryota; Viridiplantae; Streptophyta; Streptophytina; Embryophyta; Tracheophyta; Euphyllophyta; Spermatophyta; Magnoliophyta; Mesangiospermae; eudicotyledons; Gunneridae; Pentapetalae; rosids; malvids; Brassicales; Brassicaceae; Camelineae; Arabidopsis',
-                          'meh/3702_taxon', 'Eukaryota', 11))
-        self.assertEqual(self.genome_interface.retrieve_taxon("meh", "Escherichia coli"),
-                         ('cellular organisms; Bacteria; Proteobacteria; Gammaproteobacteria; Enterobacterales; Enterobacteriaceae; Escherichia',
-                          'meh/562_taxon', 'Bacteria', 11))
-        self.assertEqual(self.genome_interface.retrieve_taxon("meh", "rhodobacter"),
-                         ('Unconfirmed Organism: rhodobacter',
-                          'ReferenceTaxons/unknown_taxon', 'Unknown', 11)
-                         )
-        self.assertEqual(self.genome_interface.retrieve_taxon("meh", "foo"),
-                         ('Unconfirmed Organism: foo',
-                          'ReferenceTaxons/unknown_taxon', 'Unknown', 11))
-
     def test_user(self):
         self.assertEqual(GenomeInterface.determine_tier('RefSeq user'),
                          ('RefSeq', ['ExternalDB', 'User']))
@@ -80,7 +65,7 @@ class GenomeFileUtilTest(unittest.TestCase):
                                               ["A", 200, "-", 50]]}
         cds_3 = {"type": "CDS", "location": [["B", 125, "+", 50]]}
         cds_3a = {"type": "CDS", "location": [["B", 150, "+", 50], ["B", 175, "+", 75],
-                                             ["B", 300, "+", 75], ["B", 400, "+", 50]]}
+                                              ["B", 300, "+", 75], ["B", 400, "+", 50]]}
         cds_4 = {"type": "mRNA", "location": [["A", 100, "+", 50], ["A", 175, "+", 50],
                                               ["A", 300, "+", 75], ["A", 400, "+", 50]]}
         cds_5 = {"type": "mRNA", "location": [["A", 100, "+", 50], ["A", 400, "+", 50]]}

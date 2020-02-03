@@ -1,39 +1,34 @@
-import os
-import sys
-import shutil
-import uuid
-import time
-import json
-import hashlib
 import collections
-import datetime
-import re
 import copy
+import datetime
+import hashlib
+import json
+import logging
+import os
+import re
+import shutil
+import sys
+import time
 import urllib.parse as parse
+import uuid
 
-# KBase imports
-from installed_clients.DataFileUtilClient import DataFileUtil
-from installed_clients.AssemblyUtilClient import AssemblyUtil
-from GenomeFileUtil.core import GenomeUtils
-from GenomeFileUtil.core.GenomeUtils import is_parent, warnings, check_full_contig_length_or_multi_strand_feature
-from GenomeFileUtil.core.GenomeUtils import propagate_cds_props_to_gene, load_ontology_mappings
-from GenomeFileUtil.core.GenomeInterface import GenomeInterface
-
-# 3rd party imports
+import Bio.SeqIO
 from Bio.Data import CodonTable
 from Bio.Data.CodonTable import TranslationError
-import Bio.SeqIO
 from Bio.Seq import Seq
+
+from GenomeFileUtil.core import GenomeUtils
+from GenomeFileUtil.core.GenomeInterface import GenomeInterface
+from GenomeFileUtil.core.GenomeUtils import is_parent, warnings, \
+    check_full_contig_length_or_multi_strand_feature
+from GenomeFileUtil.core.GenomeUtils import propagate_cds_props_to_gene, load_ontology_mappings
+from installed_clients.AssemblyUtilClient import AssemblyUtil
+from installed_clients.DataFileUtilClient import DataFileUtil
 
 codon_table = CodonTable.ambiguous_generic_by_name["Standard"]
 strand_table = str.maketrans("1?.", "+++")
 snake_re = re.compile('((?<=[a-z0-9])[A-Z]|(?!^)[A-Z](?=[a-z]))')
 MAX_MISC_FEATURE_SIZE = 10000
-
-
-def log(message, prefix_newline=False):
-    """Logging function, provides a hook to suppress or redirect log messages."""
-    print(('\n' if prefix_newline else '') + '{0:.2f}'.format(time.time()) + ': ' + str(message))
 
 
 def make_snake_case(string):
@@ -51,22 +46,28 @@ class FastaGFFToGenome:
         self.time_string = str(datetime.datetime.fromtimestamp(
             time.time()).strftime('%Y_%m_%d_%H_%M_%S'))
         yml_text = open('/kb/module/kbase.yml').read()
-        self.version = re.search("module-version:\n\W+(.+)\n", yml_text).group(1)
+        mod_match = re.search(r'module-version:\n\W+(.+)\n', yml_text)
+        if mod_match:
+            self.version = mod_match.group(1)
+        else:
+            self.version = None
         self.ont_mappings = load_ontology_mappings('/kb/module/data')
         self.code_table = 11
         self.skip_types = ('exon', 'five_prime_UTR', 'three_prime_UTR',
                            'start_codon', 'stop_codon', 'region', 'chromosome', 'scaffold')
         self.spoof_gene_count = 0
         self.is_phytozome = False
+        self.is_metagenome = False
         self.strict = True
         self.generate_genes = False
-        self.warnings = []
-        self.feature_dict = collections.OrderedDict()
-        self.cdss = set()
-        self.ontologies_present = collections.defaultdict(dict)
-        self.ontology_events = list()
-        self.skiped_features = collections.Counter()
-        self.feature_counts = collections.Counter()
+        self.warnings = []  # type: list
+        self.feature_dict = collections.OrderedDict()  # type: dict
+        self.cdss = set()  # type: set
+        self.ontologies_present = collections.defaultdict(dict)  # type: dict
+        self.ontology_events = list()  # type: list
+        self.skiped_features = collections.Counter()  # type: collections.Counter
+        self.feature_counts = collections.Counter()  # type: collections.Counter
+        self.re_api_url = config.re_api_url
 
     def warn(self, message):
         self.warnings.append(message)
@@ -76,8 +77,7 @@ class FastaGFFToGenome:
         self._validate_import_file_params(params)
         self.code_table = params.get('genetic_code', 11)
         # 2) construct the input directory staging area
-        input_directory = os.path.join(self.cfg.sharedFolder,
-                                       'fast_gff_upload_' + str(uuid.uuid4()))
+        input_directory = os.path.join(self.cfg.sharedFolder, 'fast_gff_upload_' + str(uuid.uuid4()))
         os.makedirs(input_directory)
         file_paths = self._stage_input(params, input_directory)
         # 3) extract out the parameters
@@ -86,38 +86,34 @@ class FastaGFFToGenome:
             self.generate_genes = True
 
         # 4) do the upload
-        genome = self._gen_genome_json(
-            params,
-            input_fasta_file=file_paths["fasta_file"],
-            input_gff_file=file_paths["gff_file"],
-            workspace_name=params['workspace_name'],
-            core_genome_name=params['genome_name'],
-            scientific_name=params['scientific_name'],
-            source=params['source'],
-            source_id=params['source_id'],
-            release=params['release'],
-        )
+        genome = self._gen_genome_json(params, file_paths["gff_file"], file_paths["fasta_file"])
 
         return genome, input_directory
 
     def import_file(self, params):
+        self.is_metagenome = params.get('is_metagenome', False)
+        if self.is_metagenome:
+            ws_datatype = "KBaseMetagenomes.AnnotatedMetagenomeAssembly"
+        else:
+            ws_datatype = "KBaseGenomes.Genome"
 
         genome, input_directory = self.generate_genome_json(params)
 
-        json.dump(genome, open("{}/{}.json".format(self.cfg.sharedFolder,
-                                                   genome['id']), 'w'),
-                  indent=4)
+        json.dump(genome, open(f"{self.cfg.sharedFolder}/{genome['id']}.json", 'w'), indent=4)
         result = self.gi.save_one_genome({
             'workspace': params['workspace_name'],
             'name': params['genome_name'],
             'data': genome,
             "meta": params.get('metadata', {}),
+            'workspace_datatype': ws_datatype,
         })
-        report_string = 'A genome with {} contigs and the following feature ' \
-                        'types was imported: {}'\
-            .format(len(genome['contig_ids']), "\n".join(
-                [k + ": " + str(v) for k, v in genome['feature_counts'].items()]))
-        log(report_string)
+        feature_types = "\n".join([f"{k}: {v}" for k, v in genome['feature_counts'].items()])
+        report_string = (
+            f"A genome with {len(genome['contig_ids'])} contigs and the following feature "
+            f"types was imported: \n{feature_types}"
+        )
+        # XXX report_string is unused except for this log
+        logging.info(report_string)
 
         # 5) clear the temp directory
         shutil.rmtree(input_directory)
@@ -125,17 +121,13 @@ class FastaGFFToGenome:
         # 6) return the result
         info = result['info']
         details = {
-            'genome_ref': str(info[6]) + '/' + str(info[0]) + '/' + str(info[4]),
+            'genome_ref': f'{info[6]}/{info[0]}/{info[4]}',
             'genome_info': info
         }
 
         return details
 
-    def _gen_genome_json(self, params, input_gff_file=None, input_fasta_file=None,
-                        workspace_name=None, core_genome_name=None,
-                        scientific_name="unknown_taxon", source=None, source_id=None,
-                        release=None):
-
+    def _gen_genome_json(self, params, input_gff_file, input_fasta_file):
         # reading in GFF file
         features_by_contig = self._retrieve_gff_file(input_gff_file)
         contig_ids = set()
@@ -150,39 +142,45 @@ class FastaGFFToGenome:
                 self._transform_feature(contig, feature)
 
         for cid in set(features_by_contig.keys()) - contig_ids:
-            self.warn("Sequence name {} does not match a sequence id in the "
-                      "FASTA file. {} features will not be imported."
-                      .format(cid, len(features_by_contig[cid])))
+            self.warn(f"Sequence name {cid} does not match a sequence id in the FASTA file."
+                      f"{len(features_by_contig[cid])} features will not be imported.")
             if self.strict:
                 raise ValueError("Every feature sequence id must match a fasta sequence id")
-        self._process_cdss()
+        prot_fasta_path = f"{self.cfg.sharedFolder}/{params['genome_name']}_protein.fasta"
+        # if is a metagenome, the following function writes a protein fasta
+        self._process_cdss(prot_fasta_path)
 
         # save assembly file
+        '''
+        Metagenome Changes:
+            if we want to pass more stuff to AssemblyUtil, do here.
+        TODO: add flag to save_assembly_from_fasta
+        '''
+        if self.is_metagenome:
+            genome_type = "metagenome"
+        else:
+            genome_type = params.get('genome_type', 'isolate')
         assembly_ref = self.au.save_assembly_from_fasta(
             {'file': {'path': input_fasta_file},
-             'workspace_name': workspace_name,
-             'assembly_name': core_genome_name + ".assembly",
-             'type': params.get('genome_type', 'isolate'),
+             'workspace_name': params['workspace_name'],
+             'assembly_name': params['genome_name'] + ".assembly",
+             'type': genome_type,
              })
         assembly_data = self.dfu.get_objects(
             {'object_refs': [assembly_ref],
              'ignore_errors': 0})['data'][0]['data']
 
         # generate genome info
-        genome = self._gen_genome_info(core_genome_name, scientific_name,
-                                       assembly_ref, source, source_id, assembly_data,
-                                       input_gff_file, molecule_type)
-        genome['release'] = release
-        if params.get('genetic_code'):
-            genome["genetic_code"] = params['genetic_code']
-
-        if params.get('genome_type'):
-            genome['genome_type'] = params['genome_type']
+        genome = self._gen_genome_info(assembly_ref, assembly_data,
+                                       input_gff_file, molecule_type,
+                                       prot_fasta_path, params)
 
         if self.spoof_gene_count > 0:
-            genome['warnings'] = genome.get('warnings', []) + \
-                                    [warnings['spoofed_genome'].format(self.spoof_gene_count)]
+            self.warn(warnings['spoofed_genome'].format(self.spoof_gene_count))
             genome['suspect'] = 1
+
+        if self.warnings:
+            genome['warnings'] = self.warnings
 
         return genome
 
@@ -215,47 +213,39 @@ class FastaGFFToGenome:
         # check for required parameters
         for p in ['workspace_name', 'genome_name', 'fasta_file', 'gff_file']:
             if p not in params:
-                raise ValueError('"{}" parameter is required, but missing'.format(p))
+                raise ValueError(f'"{p}" parameter is required, but missing')
 
         # one and only one of 'path', or 'shock_id' is required
         for key in ('fasta_file', 'gff_file'):
             file = params[key]
             if not isinstance(file, dict):
-                raise ValueError('Required "{}" field must be a map/dict'.format(key))
-            n_valid_fields = 0
-            if 'path' in file and file['path'] is not None:
-                n_valid_fields += 1
-            if 'shock_id' in file and file['shock_id'] is not None:
-                n_valid_fields += 1
-            if 'ftp_url' in file and file['ftp_url'] is not None:
-                n_valid_fields += 1
-                raise ValueError('FTP link is currently not supported for FastaGFFToGenome')
+                raise ValueError(f'Required "{key}" field must be a map/dict')
+            sources = ('path', 'shock_id')
+            n_valid_fields = sum(1 for f in sources if file.get(f))
+            print(f"inputs: {n_valid_fields}")
             if n_valid_fields < 1:
-                error_msg = 'Required "{}" field must include one source: '.format(key)
-                error_msg += 'path | shock_id'
-                raise ValueError(error_msg)
+                raise ValueError(f'Required "{key}" field must include one source: '
+                                 f'{", ".join(sources)}')
             if n_valid_fields > 1:
-                error_msg = 'Required "{}" field has too many sources specified: '.format(key)
-                error_msg += str(list(file.keys()))
-                raise ValueError(error_msg)
+                raise ValueError(f'Required "{key}" field has too many sources specified: '
+                                 f'{", ".join(file.keys())}')
         if params.get('genetic_code'):
             if not (isinstance(params['genetic_code'], int) and 0 < params['genetic_code'] < 32):
                 raise ValueError("Invalid genetic code specified: {}".format(params))
 
     def _set_parsed_params(self, params):
-        log('Setting params')
+        logging.info('Setting params')
 
         default_params = {
             'taxon_wsname': self.cfg.raw['taxon-workspace-name'],
             'scientific_name': 'unknown_taxon',
-            'taxon_reference': None,
             'source': 'User',
             'release': None,
             'metadata': {},
             'source_id': 'unknown',
         }
         default_params.update(params)
-        log(json.dumps(default_params, indent=1))
+        logging.info(json.dumps(default_params, indent=1))
         return default_params
 
     def _stage_input(self, params, input_directory):
@@ -268,16 +258,22 @@ class FastaGFFToGenome:
         for key in ('fasta_file', 'gff_file'):
             file = params[key]
             file_path = None
-            if 'path' in file and file['path'] is not None:
+            '''
+            below seems like weird if statement
+            '''
+            if file.get('path') is not None:
                 local_file_path = file['path']
                 file_path = os.path.join(input_directory, os.path.basename(local_file_path))
-                log('Moving file from {} to {}'.format(local_file_path, file_path))
+                logging.info(f'Moving file from {local_file_path} to {file_path}')
+                # Metagenome Updates
+                # not sure if we have to be careful about moving the objects
+                # around
                 shutil.copy2(local_file_path, file_path)
 
-            if 'shock_id' in file and file['shock_id'] is not None:
+            elif file.get('shock_id') is not None:
                 # handle shock file
-                log('Downloading file from SHOCK node: {}-{}'.format(
-                                                        self.cfg.sharedFolder, file['shock_id']))
+                logging.info(f'Downloading file from SHOCK node: '
+                             f'{self.cfg.sharedFolder}-{file["shock_id"]}')
                 sys.stdout.flush()
                 file_name = self.dfu.shock_to_file({'file_path': input_directory,
                                                     'shock_id': file['shock_id']
@@ -285,8 +281,13 @@ class FastaGFFToGenome:
                 file_path = os.path.join(input_directory, file_name)
 
             # extract the file if it is compressed
+            '''
+            Metagenome Changes:
+            may have to make check here to see if the the file is too big for
+            working dir.
+            '''
             if file_path is not None:
-                log("staged input file =" + file_path)
+                logging.info("staged input file =" + file_path)
                 sys.stdout.flush()
                 dfUtil_result = self.dfu.unpack_file({'file_path': file_path})
                 file_paths[key] = dfUtil_result['file_path']
@@ -298,106 +299,111 @@ class FastaGFFToGenome:
     def _retrieve_gff_file(self, input_gff_file):
         """
         _retrieve_gff_file: retrieve info from gff_file
-    
+
         """
-        log("Reading GFF file")
-    
-        feature_list = collections.defaultdict(list)
+        logging.info("Reading GFF file")
+
+        feature_list = collections.defaultdict(list)  # type: dict
         is_patric = 0
 
-        gff_file_handle = open(input_gff_file)
-        current_line = gff_file_handle.readline()
-        line_count = 0
+        '''
+        Metagenome Changes:
+            the lines below iterate through the entire gff input file, which
+            for a Metagenome may be an issue.
 
-        while (current_line != ''):
-            current_line = current_line.strip()
+            ! Only a problem if there are space limits on processing in this
+              request
+        '''
+        for current_line in open(input_gff_file):
+            if current_line.isspace() or current_line == "" or current_line.startswith("#"):
+                continue
 
-            if(current_line.isspace() or current_line == "" or current_line.startswith("#")):
-                pass
-            else:
-                #Split line
+            # Split line
+            try:
                 (contig_id, source_id, feature_type, start, end,
                  score, strand, phase, attributes) = current_line.split('\t')
+            except ValueError:
+                raise ValueError(f"unable to parse {current_line}")
 
-                #Checking to see if Phytozome
-                if "phytozome" in source_id.lower():
-                    self.is_phytozome = True
+            ''' Do Metagenomes need this phytozome/PATRIC stuff??'''
+            # Checking to see if Phytozome
+            if "phytozome" in source_id.lower():
+                self.is_phytozome = True
 
-                #Checking to see if Phytozome
-                if "PATRIC" in source_id:
-                    is_patric = True
+            # Checking to see if Phytozome
+            if "PATRIC" in source_id:
+                is_patric = True
 
-                #PATRIC prepends their contig ids with some gibberish
-                if is_patric and "|" in contig_id:
-                    contig_id = contig_id.split("|", 1)[1]
+            # PATRIC prepends their contig ids with some gibberish
+            if is_patric and "|" in contig_id:
+                contig_id = contig_id.split("|", 1)[1]
 
-                #Populating basic feature object
-                ftr = {'contig': contig_id, 'source': source_id,
-                       'type': feature_type, 'start': int(start),
-                       'end': int(end), 'score': score, 'strand': strand,
-                       'phase': phase, 'attributes': collections.defaultdict(list)}
+            # Populating basic feature object
+            ftr: dict = {'contig': contig_id, 'source': source_id,
+                         'type': feature_type, 'start': int(start),
+                         'end': int(end), 'score': score, 'strand': strand,
+                         'phase': phase, 'attributes': collections.defaultdict(list)}
 
-                #Populating with attribute key-value pair
-                #This is where the feature id is from
-                for attribute in attributes.split(";"):
-                    attribute = attribute.strip()
+            # Populating with attribute key-value pair
+            # This is where the feature id is from
+            for attribute in attributes.split(";"):
+                attribute = attribute.strip()
 
-                    #Sometimes empty string
-                    if not attribute:
-                        continue
+                # Sometimes empty string
+                if not attribute:
+                    continue
 
-                    #Use of 1 to limit split as '=' character can also be made available later
-                    #Sometimes lack of "=", assume spaces instead
-                    if "=" in attribute:
-                        key, value = attribute.split("=", 1)
+                # Use of 1 to limit split as '=' character can also be made available later
+                # Sometimes lack of "=", assume spaces instead
+                if "=" in attribute:
+                    key, value = attribute.split("=", 1)
 
-                    elif " " in attribute:
-                        key, value = attribute.split(" ", 1)
+                elif " " in attribute:
+                    key, value = attribute.split(" ", 1)
 
-                    else:
-                        # Can not parse attribute
-                        continue
+                else:
+                    logging.debug(f'Unable to parse {attribute}')
+                    continue
 
-                    ftr['attributes'][make_snake_case(key)].append(parse.unquote(value.strip('"')))
+                ftr['attributes'][make_snake_case(key)].append(parse.unquote(value.strip('"')))
 
-                ftr['attributes']['raw'] = attributes
-                if "id" in ftr['attributes']:
-                    ftr['ID'] = ftr['attributes']['id'][0]
-                if "parent" in ftr['attributes']:
-                    ftr['Parent'] = ftr['attributes']['parent'][0]
+            ftr['attributes']['raw'] = attributes
+            if "id" in ftr['attributes']:
+                ftr['ID'] = ftr['attributes']['id'][0]
+            if "parent" in ftr['attributes']:
+                ftr['Parent'] = ftr['attributes']['parent'][0]
 
-                feature_list[contig_id].append(ftr)
+            feature_list[contig_id].append(ftr)
 
-            current_line = gff_file_handle.readline()
-
-        gff_file_handle.close()
-
-        #Some GFF/GTF files don't use "ID" so we go through the possibilities        
+        # Some GFF/GTF files don't use "ID" so we go through the possibilities
         feature_list = self._add_missing_identifiers(feature_list)
 
-        #Most bacterial files have only CDSs
-        #In order to work with prokaryotic and eukaryotic gene structure synonymously
-        #Here we add feature dictionaries representing the parent gene and mRNAs
-        #feature_list = self._add_missing_parents(feature_list)
+        # Most bacterial files have only CDSs
+        # In order to work with prokaryotic and eukaryotic gene structure synonymously
+        # Here we add feature dictionaries representing the parent gene and mRNAs
+        # feature_list = self._add_missing_parents(feature_list)
 
-        #Phytozome has the annoying habit of editing their identifiers so we fix them
+        # Phytozome has the annoying habit of editing their identifiers so we fix them
         if self.is_phytozome:
             self._update_phytozome_features(feature_list)
 
-        #All identifiers need to be checked so that they follow the same general rules
-        #Rules are listed within the function itself
+        # All identifiers need to be checked so that they follow the same general rules
+        # Rules are listed within the function itself
         feature_list = self._update_identifiers(feature_list)
 
         return feature_list
 
     def _add_missing_identifiers(self, feature_list):
-        log("Adding missing identifiers")
-        #General rule is to iterate through a range of possibilities if "ID" is missing
+        logging.info("Adding missing identifiers")
+        # General rule is to iterate through a range of possibilities if "ID" is missing
         for contig in feature_list:
             for i, feat in enumerate(feature_list[contig]):
                 if "ID" not in feature_list[contig][i]:
-                    for key in ("transcriptid", "proteinid", "pacid",
-                                "parent", "name", 'transcript_id'):
+                    # all of the following are not guaranteed to be unique ID's
+                    # for key in ("transcriptid", "proteinid", "pacid",
+                    #             "parent", "name", 'transcript_id'):
+                    for key in ("protein_id", "name",
+                                "pacid", "parent"):
                         if key in feature_list[contig][i]['attributes']:
                             feature_list[contig][i]['ID'] = feature_list[
                                 contig][i]['attributes'][key][0]
@@ -405,87 +411,83 @@ class FastaGFFToGenome:
                     if feat['type'] not in self.skip_types:
                         self.feature_counts[feat['type']] += 1
 
-                    #If the process fails, throw an error
+                    # If the process fails, throw an error
                     if "ID" not in feature_list[contig][i]:
-                        feat['ID'] = "{}_{}".format(feat['type'],
-                                                    self.feature_counts[feat['type']])
-                        #log("Warning: Could find unique ID to utilize in GFF attributes: {}. "
-                        #    "ID '{}' has been assigned".format(feat['attributes'], feat['ID']))
+                        feat['ID'] = f"{feat['type']}_{self.feature_counts[feat['type']]}"
         return feature_list
 
     def _add_missing_parents(self, feature_list):
 
-        #General rules is if CDS or RNA missing parent, add them
+        # General rules is if CDS or RNA missing parent, add them
         for contig in feature_list:
             ftrs = feature_list[contig]
             new_ftrs = []
             for i in range(len(ftrs)):
                 if ftrs[i]["type"] in self.skip_types:
                     continue
-                if("Parent" not in ftrs[i]):
-                    #Assuming parent doesn't exist at all, so create de novo instead of trying to find it
-                    if("RNA" in ftrs[i]["type"] or "CDS" in ftrs[i]["type"]):
+                if "Parent" not in ftrs[i]:
+                    # Assuming parent doesn't exist at all, so create de novo instead of trying to find it
+                    if "RNA" in ftrs[i]["type"] or "CDS" in ftrs[i]["type"]:
                         new_gene_ftr = copy.deepcopy(ftrs[i])
                         new_gene_ftr["type"] = "gene"
-                        ftrs[i]["Parent"]=new_gene_ftr["ID"]
+                        ftrs[i]["Parent"] = new_gene_ftr["ID"]
                         new_ftrs.append(new_gene_ftr)
 
-                    if("CDS" in ftrs[i]["type"]):
+                    if "CDS" in ftrs[i]["type"]:
                         new_rna_ftr = copy.deepcopy(ftrs[i])
                         new_rna_ftr["type"] = "mRNA"
                         new_ftrs.append(new_rna_ftr)
-                        ftrs[i]["Parent"]=new_rna_ftr["ID"]
+                        ftrs[i]["Parent"] = new_rna_ftr["ID"]
 
                 new_ftrs.append(ftrs[i])
-            feature_list[contig]=new_ftrs
+            feature_list[contig] = new_ftrs
         return feature_list
 
     @staticmethod
     def _update_phytozome_features(feature_list):
 
-        #General rule is to use the "Name" field where possible
-        #And update parent attribute correspondingly
+        # General rule is to use the "Name" field where possible
+        # And update parent attribute correspondingly
         for contig in feature_list:
             feature_position_dict = {}
             for i in range(len(feature_list[contig])):
 
-                #Maintain old_id for reference
-                #Sometimes ID isn't available, so use PACid
+                # Maintain old_id for reference
+                # Sometimes ID isn't available, so use PACid
                 old_id = None
                 for key in ("id", "pacid"):
-                    if(key in feature_list[contig][i]['attributes']):
+                    if key in feature_list[contig][i]['attributes']:
                         old_id = feature_list[contig][i]['attributes'][key][0]
                         break
-                if(old_id is None):
-                    #This should be an error
-                    #log("Cannot find unique ID, PACid, or pacid in GFF "
-                    #    "attributes: " + feature_list[contig][i][contig])
+                if old_id is None:
                     continue
 
-                #Retain old_id
-                feature_position_dict[old_id]=i
+                # Retain old_id
+                feature_position_dict[old_id] = i
 
                 # Clip off the increment on CDS IDs so fragments of the same
                 # CDS share the same ID
                 if "CDS" in feature_list[contig][i]["ID"]:
                     feature_list[contig][i]["ID"] = feature_list[contig][i]["ID"].rsplit('.', 1)[0]
 
-                #In Phytozome, gene and mRNA have "Name" field, CDS do not
-                if("name" in feature_list[contig][i]['attributes']):
+                # In Phytozome, gene and mRNA have "Name" field, CDS do not
+                if "name" in feature_list[contig][i]['attributes']:
                     feature_list[contig][i]["ID"] = feature_list[contig][i]['attributes']['name'][0]
 
-                if("Parent" in feature_list[contig][i]):
-                    #Update Parent to match new ID of parent ftr
-                    feature_list[contig][i]["Parent"] = feature_list[contig][feature_position_dict[feature_list[contig][i]["Parent"]]]["ID"]
+                if "Parent" in feature_list[contig][i]:
+                    # Update Parent to match new ID of parent ftr
+                    feature_list[contig][i]["Parent"] = feature_list[contig][
+                        feature_position_dict[feature_list[contig][i]["Parent"]]
+                    ]["ID"]
 
         return feature_list
 
     def _update_identifiers(self, feature_list):
 
-        #General rules:
-        #1) Genes keep identifier
-        #2) RNAs keep identifier only if its different from gene, otherwise append ".mRNA"
-        #3) CDS always uses RNA identifier with ".CDS" appended
+        # General rules:
+        # 1) Genes keep identifier
+        # 2) RNAs keep identifier only if its different from gene, otherwise append ".mRNA"
+        # 3) CDS always uses RNA identifier with ".CDS" appended
 
         mRNA_parent_dict = dict()
 
@@ -493,27 +495,27 @@ class FastaGFFToGenome:
             for ftr in feature_list[contig]:
                 if ftr["type"] in self.skip_types:
                     continue
-                if("Parent" in ftr):
-                    #Retain old_id of parents
+                if "Parent" in ftr:
+                    # Retain old_id of parents
                     old_id = ftr["ID"]
 
-                    if(ftr["ID"] == ftr["Parent"] or "CDS" in ftr["type"]):
+                    if ftr["ID"] == ftr["Parent"] or "CDS" in ftr["type"]:
                         ftr["ID"] = ftr["Parent"]+"."+ftr["type"]
 
-                    #link old to new ids for mRNA to use with CDS
-                    if("RNA" in ftr["type"]):
-                        mRNA_parent_dict[old_id]=ftr["ID"]
+                    # link old to new ids for mRNA to use with CDS
+                    if "RNA" in ftr["type"]:
+                        mRNA_parent_dict[old_id] = ftr["ID"]
 
         return feature_list
 
-    def _check_location_order(self,locations):
-        """If order looks good return None.  
+    def _check_location_order(self, locations):
+        """If order looks good return None.
            If out of order return warning
            If on multiple strands return warning"""
         strand = None
         last_start = 0
         for location in locations:
-            if strand == None:
+            if strand is None:
                 strand = location[2]
             elif strand != location[2]:
                 return warnings["both_strand_coordinates"]
@@ -524,7 +526,7 @@ class FastaGFFToGenome:
                 return warnings["out_of_order"]
             else:
                 last_start = location[1]
-        return None        
+        return None
 
     def _create_ontology_event(self, ontology_type):
         """Creates the ontology_event if necessary
@@ -552,7 +554,7 @@ class FastaGFFToGenome:
 
     def _get_ontology_db_xrefs(self, feature):
         """Splits the ontology info from the other db_xrefs"""
-        ontology = collections.defaultdict(dict)
+        ontology = collections.defaultdict(dict)  # type: dict
         db_xrefs = []
         # these are keys are formatted strangely and require special parsing
         for key in ("go_process", "go_function", "go_component"):
@@ -570,7 +572,7 @@ class FastaGFFToGenome:
 
         search_keys = ['ontology_term', 'db_xref', 'dbxref', 'product_source', 'tigrfam', 'pfam',
                        'cog', 'go', 'po', 'ko']
-        ont_terms = []
+        ont_terms = []  # type: list
         # flatten out into list of values
         for key in search_keys:
             if key in feature:
@@ -595,10 +597,16 @@ class FastaGFFToGenome:
             elif ref.startswith('TIGR'):
                 ontology['TIGRFAM'][ref] = [self._create_ontology_event("TIGRFAM")]
                 self.ontologies_present['TIGRFAM'][ref] = self.ont_mappings['TIGRFAM'].get(ref, '')
+            elif ":" not in ref:
+                db_xrefs.append(tuple(["Unknown_Source", ref]))
             else:
                 db_xrefs.append(tuple(ref.split(":", 1)))
         return dict(ontology), db_xrefs
 
+    '''
+    Metagenome Changes:
+        okay looks like this might be the real meat of it
+    '''
     def _transform_feature(self, contig, in_feature):
         """Converts a feature from the gff ftr format into the appropriate
         format for a genome object """
@@ -612,11 +620,10 @@ class FastaGFFToGenome:
             return alias_list
 
         if in_feature['start'] < 1 or in_feature['end'] > len(contig):
-            self.warn("Feature with invalid location for specified "
-                      "contig: " + str(in_feature))
+            self.warn(f"Feature with invalid location for specified contig: {in_feature}")
             if self.strict:
                 raise ValueError("Features must be completely contained within the Contig in the "
-                                 "Fasta file. Feature: " + str(in_feature))
+                                 f"Fasta file. Feature: in_feature")
             return
 
         feat_seq = contig.seq[in_feature['start']-1:in_feature['end']].upper()
@@ -640,6 +647,8 @@ class FastaGFFToGenome:
             "dna_sequence": str(feat_seq),
             "dna_sequence_length": len(feat_seq),
             "md5": hashlib.md5(str(feat_seq).encode('utf8')).hexdigest(),
+            "warnings": [],
+            "flags": [],
         }
 
         # add optional fields
@@ -665,14 +674,14 @@ class FastaGFFToGenome:
         if 'inference' in in_feature['attributes']:
             GenomeUtils.parse_inferences(in_feature['attributes']['inference'])
         if 'trans-splicing' in in_feature['attributes'].get('exception', []):
-            out_feat['flags'] = out_feat.get('flags',[]) + ['trans_splicing']
+            out_feat['flags'].append('trans_splicing')
         if 'pseudo' in in_feature['attributes'].get('exception', []):
-            out_feat['flags'] = out_feat.get('flags',[]) + ['pseudo']
+            out_feat['flags'].append('pseudo')
         if 'ribosomal-slippage' in in_feature['attributes'].get('exception', []):
-            out_feat['flags'] = out_feat.get('flags',[]) + ['ribosomal_slippage']
+            out_feat['flags'].append('ribosomal_slippage')
         parent_id = in_feature.get('Parent', '')
         if parent_id and parent_id not in self.feature_dict:
-            raise ValueError("Parent ID: {} was not found in feature ID list.".format(parent_id))
+            raise ValueError(f"Parent ID: {parent_id} was not found in feature ID list.")
 
         # if the feature is a exon or UTR, it will only be used to update the
         # location and sequence of it's parent, we add the info to it parent
@@ -694,19 +703,19 @@ class FastaGFFToGenome:
             if parent_id:
                 parent = self.feature_dict[parent_id]
                 if 'cdss' in parent:  # parent must be a gene
-                    if not is_parent(parent,out_feat):
-                        parent["warnings"] = parent.get('warnings', [] ) + [
+                    if not is_parent(parent, out_feat):
+                        parent["warnings"] = parent.get('warnings', []) + [
                             warnings["genes_CDS_child_fails_location_validation"].format(out_feat["id"])]
-                        out_feat["warnings"] = out_feat.get('warnings', []) + [
-                            warnings["CDS_fail_child_of_gene_coordinate_validation"].format(parent_id)]      
+                        out_feat["warnings"].append(
+                            warnings["CDS_fail_child_of_gene_coordinate_validation"].format(parent_id))
                     parent['cdss'].append(in_feature['ID'])
-                    out_feat['parent_gene'] = parent_id             
+                    out_feat['parent_gene'] = parent_id
                 else:  # parent must be mRNA
-                    if not is_parent(parent,out_feat):
-                        parent["warnings"] = parent.get('warnings', [] ) + [
+                    if not is_parent(parent, out_feat):
+                        parent["warnings"] = parent.get('warnings', []) + [
                             warnings["mRNA_fail_parent_coordinate_validation"].format(out_feat["id"])]
-                        out_feat["warnings"] = out_feat.get('warnings', []) + [
-                            warnings["CDS_fail_child_of_mRNA_coordinate_validation"].format(parent_id)]      
+                        out_feat["warnings"].append(
+                            warnings["CDS_fail_child_of_mRNA_coordinate_validation"].format(parent_id))
                     parent['cds'] = in_feature['ID']
                     out_feat['parent_mrna'] = parent_id
                     parent_gene = self.feature_dict[parent['parent_gene']]
@@ -718,16 +727,16 @@ class FastaGFFToGenome:
         elif in_feature['type'] == 'mRNA':
             if parent_id:
                 parent = self.feature_dict[parent_id]
-                if 'mrnas' not in parent:                         
+                if 'mrnas' not in parent:
                     parent['mrnas'] = []
                 if 'cdss' in parent:  # parent must be a gene
                     parent['mrnas'].append(in_feature['ID'])
                     out_feat['parent_gene'] = parent_id
-                if not is_parent(parent,out_feat):
-                    parent["warnings"] = parent.get('warnings', [] ) + [
+                if not is_parent(parent, out_feat):
+                    parent["warnings"] = parent.get('warnings', []) + [
                         warnings["genes_mRNA_child_fails_location_validation"].format(out_feat["id"])]
-                    out_feat["warnings"] = out_feat.get('warnings', []) + [
-                        warnings["mRNAs_parent_gene_fails_location_validation"].format(parent_id)]    
+                    out_feat["warnings"].append(
+                        warnings["mRNAs_parent_gene_fails_location_validation"].format(parent_id))
 
         else:
             out_feat["type"] = in_feature['type']
@@ -740,17 +749,25 @@ class FastaGFFToGenome:
                     parent['children'] = []
                 parent['children'].append(out_feat['id'])
                 out_feat['parent_gene'] = parent_id
-                if not is_parent(parent,out_feat):
-                    parent["warnings"] = parent.get('warnings', [] ) + [
+                if not is_parent(parent, out_feat):
+                    parent["warnings"] = parent.get('warnings', []) + [
                         warnings["generic_parents_child_fails_location_validation"].format(out_feat["id"])]
-                    out_feat["warnings"] = out_feat.get('warnings', []) + [
-                        warnings["generic_childs_parent_fails_location_validation"].format(parent_id)]    
+                    out_feat["warnings"].append(
+                        warnings["generic_childs_parent_fails_location_validation"].format(parent_id))
+
+        # cleanup empty optional arrays
+        for key in ['warnings', 'flags']:
+            if not out_feat[key]:
+                del out_feat[key]
 
         self.feature_dict[out_feat['id']] = out_feat
 
-    def _process_cdss(self):
+    def _process_cdss(self, prot_fasta_path):
         """Because CDSs can have multiple fragments, it's necessary to go
         back over them to calculate a final protein sequence"""
+        if self.is_metagenome:
+            prot_fasta = {}  # type: dict
+            untranslatable_prot = set()
         for cds_id in self.cdss:
             cds = self.feature_dict[cds_id]
             try:
@@ -758,13 +775,41 @@ class FastaGFFToGenome:
                             self.code_table, cds=True).strip("*"))
             except TranslationError as e:
                 cds['warnings'] = cds.get('warnings', []) + [str(e)]
+                # NOTE: we may need a different way of handling this for metagenomes.
                 prot_seq = ""
+                if self.is_metagenome:
+                    untranslatable_prot.add(cds_id)
 
-            cds.update({
-                "protein_translation": prot_seq,
-                "protein_md5": hashlib.md5(prot_seq.encode('utf8')).hexdigest(),
-                "protein_translation_length": len(prot_seq),
-            })
+            if self.is_metagenome:
+                if prot_seq != "":
+                    protein_id = ""
+                    if cds.get("aliases"):
+                        aliases = cds['aliases']
+                        for key, val in aliases:
+                            if key == "protein_id":
+                                protein_id = val
+                        if not protein_id:
+                            protein_id = cds['id']  # assign to some default
+                    else:
+                        # log a warning here?
+                        pass
+                    # TODO: update header to reflect what we actually want people
+                    # to see.
+                    if protein_id in prot_fasta:
+                        prot_fasta[protein_id][0] += "|" + cds['id']
+                    else:
+                        fasta_seq_data = ">" + protein_id + " cds_ids:" + cds['id']
+                        prot_fasta[protein_id] = [fasta_seq_data, prot_seq]
+                else:
+                    pass
+
+            else:
+                cds.update({
+                    "protein_translation": prot_seq,
+                    "protein_md5": hashlib.md5(prot_seq.encode('utf8')).hexdigest(),
+                    "protein_translation_length": len(prot_seq),
+                })
+
             if 'parent_gene' in cds:
                 parent_gene = self.feature_dict[cds['parent_gene']]
                 # no propigation for now
@@ -782,6 +827,12 @@ class FastaGFFToGenome:
                 raise ValueError(warnings['no_spoof'])
 
             self.feature_dict[cds['id']] = cds
+
+        if self.is_metagenome:
+            with open(prot_fasta_path, 'w') as fid:
+                for key, line in prot_fasta.items():
+                    fid.write('\n'.join(line))
+            # do something with 'untranslatable_prot'
 
     def _update_from_exons(self, feature):
         """This function updates the sequence and location of a feature based
@@ -806,7 +857,7 @@ class FastaGFFToGenome:
         # construct feature location from utrs and cdss if present
         elif 'cds' in feature:
             cds = [copy.deepcopy(self.feature_dict[feature['cds']])]
-            locs = []
+            locs = []  # type: list
             seq = ""
             for frag in feature.get('five_prime_UTR', []) + cds + \
                     feature.get('three_prime_UTR', []):
@@ -830,43 +881,77 @@ class FastaGFFToGenome:
             feature.pop(x, None)
 
         else:
-            ValueError('Feature {} must contain either exon or cds data to '
-                       'construct an accurate location and sequence'.format(
-                        feature['id']))
+            ValueError('Feature {feature["id"]} must contain either exon or cds data to '
+                       'construct an accurate location and sequence')
 
-    def _gen_genome_info(self, core_genome_name, scientific_name, assembly_ref,
-                         source, source_id, assembly, input_gff_file, molecule_type):
+    def _gen_genome_info(self, assembly_ref, assembly, input_gff_file, molecule_type, prot_fasta_path, params):
         """
         _gen_genome_info: generate genome info
+        Here is the meat of the saving operation.
 
+        Genome Fields:
+            features: protein encoding genes
+            cdss:
+            mrnas: mrna sequences
+            non_coding_features: everything that doesn't fall into 'features',
+                'cdss', 'mrnas'
         """
-        genome = dict()
-        genome["id"] = core_genome_name
-        genome["scientific_name"] = scientific_name
-        genome["assembly_ref"] = assembly_ref
-        genome['molecule_type'] = molecule_type
-        genome["features"] = []
-        genome["cdss"] = []
-        genome["mrnas"] = []
-        genome['non_coding_features'] = []
-        genome["gc_content"] = assembly["gc_content"]
-        genome["dna_size"] = assembly["dna_size"]
-        genome['md5'] = assembly['md5']
+        features = []
+        cdss = []
+        mrnas = []
+        non_coding_features = []
+        genome = {
+            "id": params.get('genome_name'),
+            "scientific_name": params.get('scientific_name', "Unknown"),
+            "assembly_ref": assembly_ref,
+            'molecule_type': molecule_type,
+            "gc_content": assembly["gc_content"],
+            "dna_size": assembly["dna_size"],
+            'md5': assembly['md5'],
+            'num_contigs': len(assembly['contigs']),
+            'ontologies_present': dict(self.ontologies_present),
+            'ontology_events': self.ontology_events,
+        }
+        if self.is_metagenome:
+            metagenome_fields = [
+                ("publications", []),
+                ("external_source_origination_date", None),
+                ("original_source_file_name", None),
+                ("notes", None),
+                # NOTE: in the future environment should use an ontology.
+                ("environment", None),
+            ]  # type: list
+            for field, default in metagenome_fields:
+                genome[field] = params.get(field, default)
+
+            # save protein fasta to shock
+            prot_to_shock = self.dfu.file_to_shock(
+                {'file_path': prot_fasta_path, 'make_handle': 1, 'pack': 'gzip'}
+            )
+            genome['protein_handle_ref'] = prot_to_shock['handle']['hid']
+
         genome['contig_ids'], genome['contig_lengths'] = zip(
             *[(k, v['length']) for k, v in assembly['contigs'].items()])
-        genome['num_contigs'] = len(assembly['contigs'])
-        genome['ontologies_present'] = dict(self.ontologies_present)
-        genome['ontology_events'] = self.ontology_events
-        genome['taxonomy'], genome['taxon_ref'], genome['domain'], \
-            genome["genetic_code"] = self.gi.retrieve_taxon(self.taxon_wsname,
-                                                            genome['scientific_name'])
-        genome['source'], genome['genome_tiers'] = self.gi.determine_tier(
-            source)
-        genome['source_id'] = source_id
+
+        if self.is_metagenome:
+            genome['source'], _ = self.gi.determine_tier(params.get('source'))
+        else:
+            genome['source'], genome['genome_tiers'] = self.gi.determine_tier(params.get('source'))
+
+        # Set taxonomy-related fields in the genome data
+        if params.get('taxon_id'):
+            GenomeUtils.set_taxon_data(int(params['taxon_id']), self.re_api_url, genome)
+        else:
+            GenomeUtils.set_default_taxon_data(genome)
+
+        # handle optional fields
+        for key in ('release', 'genetic_code', 'genome_type', 'source_id'):
+            if params.get(key):
+                genome[key] = params[key]
 
         # Phytozome gff files are not compatible with the RNASeq Pipeline
         # so it's better to build from the object than cache the file
-        if self.is_phytozome:
+        if self.is_phytozome or self.is_metagenome:
             gff_file_to_shock = self.dfu.file_to_shock(
                 {'file_path': input_gff_file, 'make_handle': 1, 'pack': "gzip"})
             genome['gff_handle_ref'] = gff_file_to_shock['handle']['hid']
@@ -886,33 +971,65 @@ class FastaGFFToGenome:
 
             contig_len = genome["contig_lengths"][genome["contig_ids"].index(feature["location"][0][0])]
             feature = check_full_contig_length_or_multi_strand_feature(
-                feature, is_transpliced,contig_len, self.skip_types)
+                feature, is_transpliced, contig_len, self.skip_types)
 
             # sort features into their respective arrays
             if feature['type'] == 'CDS':
-                del feature['type']
-                genome['cdss'].append(feature)
+                if not self.is_metagenome:
+                    del feature['type']
+                cdss.append(feature)
             elif feature['type'] == 'mRNA':
-                del feature['type']
-                genome['mrnas'].append(feature)
+                if not self.is_metagenome:
+                    del feature['type']
+                mrnas.append(feature)
             elif feature['type'] == 'gene':
                 # remove duplicates that may arise from CDS info propagation
                 for key in ('functions', 'aliases', 'db_xrefs'):
                     if key in feature:
                         feature[key] = list(set(feature[key]))
                 if feature['cdss']:
-                    del feature['type']
+                    if not self.is_metagenome:
+                        del feature['type']
                     self.feature_counts["protein_encoding_gene"] += 1
-                    genome['features'].append(feature)
+                    features.append(feature)
                 else:
                     feature.pop('mrnas', None)
                     feature.pop('cdss', None)
                     feature.pop('protein_translation_length', None)
-                    self.feature_counts["non_coding_features"] += 1
-                    genome['non_coding_features'].append(feature)
+                    self.feature_counts["non_coding_gene"] += 1
+                    non_coding_features.append(feature)
             else:
-                genome['non_coding_features'].append(feature)
+                non_coding_features.append(feature)
 
+        # if input is metagenome, save features, cdss, non_coding_features, and
+        # mrnas to shock
+        if self.is_metagenome:
+            # TODO: make this section more efficient by editing the above.
+            metagenome_features = features + cdss + mrnas + non_coding_features
+            genome['num_features'] = len(metagenome_features)
+            genome_name = params['genome_name']
+            json_file_path = f'{self.cfg.sharedFolder}/{genome_name}_features.json'
+            # save to json files first
+            with open(json_file_path, 'w') as fid:
+                json.dump(metagenome_features, fid)
+            # write json to shock
+            json_to_shock = self.dfu.file_to_shock(
+                {'file_path': json_file_path, 'make_handle': 1, 'pack': 'gzip'}
+            )
+            self.feature_counts["non_coding_features"] = len(non_coding_features)
+            genome['features_handle_ref'] = json_to_shock['handle']['hid']
+            # remove json file to avoid disk overload
+            os.remove(json_file_path)
+            # delete python objects to reduce overhead
+            del metagenome_features
+            del features, cdss, mrnas, non_coding_features
+        else:
+            # TODO determine whether we want to deepcopy here instead of reference.
+            genome['features'] = features
+            genome['cdss'] = cdss
+            genome['mrnas'] = mrnas
+            genome['non_coding_features'] = non_coding_features
+            self.feature_counts["non_coding_features"] = len(genome['non_coding_features'])
         if self.warnings:
             genome['warnings'] = self.warnings
         genome['feature_counts'] = dict(self.feature_counts)
