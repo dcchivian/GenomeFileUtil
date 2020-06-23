@@ -96,7 +96,7 @@ module GenomeFileUtil {
     */
 
     typedef structure {
-        string genome_ref;
+        string metagenome_ref;
         list <string> ref_path_to_genome;
         boolean is_gtf;
         string target_dir;
@@ -196,6 +196,9 @@ module GenomeFileUtil {
     funcdef export_genome_features_protein_to_fasta(ExportParams params)
                 returns (ExportOutput output) authentication required;
 
+    funcdef export_metagenome_as_gff(ExportParams params)
+                returns (ExportOutput output) authentication required;
+
     /*
     genome_name - becomes the name of the object
     workspace_name - the name of the workspace it gets saved to.
@@ -211,6 +214,8 @@ module GenomeFileUtil {
         and link to a taxon
     generate_missing_genes - If the file has CDS or mRNA with no corresponding
         gene, generate a spoofed gene. Off by default
+    existing_assembly_ref - a KBase assembly upa, to associate the genome with.
+        Avoids saving a new assembly when specified.
     */
     typedef structure {
         File fasta_file;
@@ -227,6 +232,7 @@ module GenomeFileUtil {
         string scientific_name;
         usermeta metadata;
         boolean generate_missing_genes;
+        string existing_assembly_ref;
     } FastaGFFToGenomeParams;
 
     funcdef fasta_gff_to_genome(FastaGFFToGenomeParams params)
@@ -251,6 +257,8 @@ module GenomeFileUtil {
         and link to a taxon
     generate_missing_genes - If the file has CDS or mRNA with no corresponding
         gene, generate a spoofed gene. Off by default
+    existing_assembly_ref - a KBase assembly upa, to associate the metagenome with.
+        Avoids saving a new assembly when specified.
     */
 
     typedef structure {
@@ -261,9 +269,9 @@ module GenomeFileUtil {
         string workspace_name;
 
         string source;
-        string scientific_name;
         usermeta metadata;
         boolean generate_missing_genes;
+        string existing_assembly_ref;
     } FastaGFFToMetagenomeParams;
 
     funcdef fasta_gff_to_metagenome(FastaGFFToMetagenomeParams params)
@@ -283,4 +291,117 @@ module GenomeFileUtil {
 
     funcdef save_one_genome(SaveOneGenomeParams params)
                 returns (SaveGenomeResult returnVal) authentication required;
+
+    /*
+    gff_file - object containing path to gff_file
+    ws_ref - input Assembly or Genome reference
+
+    genome_name - becomes the name of the object
+    workspace_name - the name of the workspace it gets saved to.
+    source - Source of the file typically something like RefSeq or Ensembl
+    taxon_ws_name - where the reference taxons are : ReferenceTaxons
+    taxon_id - if defined, will try to link the Genome to the specified
+        taxonomy id in lieu of performing the lookup during upload
+    release - Release or version number of the data
+          per example Ensembl has numbered releases of all their data: Release 31
+    genetic_code - Genetic code of organism. Overwrites determined GC from
+          taxon object
+    scientific_name - will be used to set the scientific name of the genome
+        and link to a taxon
+    metadata - any user input metadata
+    generate_missing_genes - If the file has CDS or mRNA with no corresponding
+        gene, generate a spoofed gene. Off by default
+    */
+
+    typedef structure {
+        string ws_ref;
+        File gff_file;
+
+        string genome_name;
+        string workspace_name;
+
+        string source;
+        string taxon_wsname;
+        string taxon_id;
+        string release;
+        int    genetic_code;
+        string scientific_name;
+        usermeta metadata;
+        boolean generate_missing_genes;
+
+    } WsObjGFFToGenomeParams;
+
+    /*
+    This function takes in a workspace object of type KBaseGenomes.Genome or KBaseGenomeAnnotations.Assembly and a gff file and produces a KBaseGenomes.Genome reanotated according to the the input gff file.
+    */
+    funcdef ws_obj_gff_to_genome(WsObjGFFToGenomeParams params)
+                returns (GenomeSaveResult returnVal) authentication required;
+
+    /*
+    gff_file - object containing path to gff_file
+    ws_ref - input Assembly or AnnotatedMetagenomeAssembly reference
+
+    genome_name - becomes the name of the object
+    workspace_name - the name of the workspace it gets saved to.
+    source - Source of the file typically something like RefSeq or Ensembl
+
+    genetic_code - Genetic code of organism. Overwrites determined GC from
+          taxon object
+    metadata - any user input metadata
+    generate_missing_genes - If the file has CDS or mRNA with no corresponding
+        gene, generate a spoofed gene. Off by default
+    */
+
+    typedef structure {
+        string ws_ref;
+        File gff_file;
+
+        string genome_name;
+        string workspace_name;
+
+        string source;
+        usermeta metadata;
+        boolean generate_missing_genes;
+
+    } WsObjGFFToMetagenomeParams;
+
+    /*
+    This function takes in a workspace object of type KBaseMetagenomes.AnnotatedMetagenomeAssembly or KBaseGenomeAnnotations.Assembly and a gff file and produces a KBaseMetagenomes.AnnotatedMetagenomeAssembly reanotated according to the the input gff file.
+    */
+    funcdef ws_obj_gff_to_metagenome(WsObjGFFToMetagenomeParams params)
+                returns (MetagenomeSaveResult returnVal) authentication required;
+
+    /*
+    Parameters for the update_taxon_assignments function.
+    Fields:
+        workspace_id: a workspace UPA of a Genome object
+        taxon_assignments: an optional mapping of assignments to add or replace. This will perform a
+            merge on the existing assignments. Any new assignments are added, while any existing
+            assignments are replaced.
+        remove_assignments: an optional list of assignment names to remove.
+
+    @optional taxon_assignments remove_assignments
+    */
+    typedef structure {
+        int workspace_id;
+        int object_id;
+        mapping<string, string> taxon_assignments;
+        list<string> remove_assignments;
+    } UpdateTaxonAssignmentsParams;
+
+    /*
+    Result of the update_taxon_assignments function.
+    Fields:
+        ws_obj_ref: a workspace UPA of a Genome object
+    */
+    typedef structure {
+        string ws_obj_ref;
+    } UpdateTaxonAssignmentsResult;
+
+    /*
+    Add, replace, or remove taxon assignments for a Genome object.
+    */
+    funcdef update_taxon_assignments(UpdateTaxonAssignmentsParams params)
+        returns (UpdateTaxonAssignmentsResult returnVal) authentication required;
+
 };

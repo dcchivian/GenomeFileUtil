@@ -374,6 +374,10 @@ class Application(object):
                              name='GenomeFileUtil.export_genome_features_protein_to_fasta',
                              types=[dict])
         self.method_authentication['GenomeFileUtil.export_genome_features_protein_to_fasta'] = 'required'  # noqa
+        self.rpc_service.add(impl_GenomeFileUtil.export_metagenome_as_gff,
+                             name='GenomeFileUtil.export_metagenome_as_gff',
+                             types=[dict])
+        self.method_authentication['GenomeFileUtil.export_metagenome_as_gff'] = 'required'  # noqa
         self.rpc_service.add(impl_GenomeFileUtil.fasta_gff_to_genome,
                              name='GenomeFileUtil.fasta_gff_to_genome',
                              types=[dict])
@@ -390,6 +394,18 @@ class Application(object):
                              name='GenomeFileUtil.save_one_genome',
                              types=[dict])
         self.method_authentication['GenomeFileUtil.save_one_genome'] = 'required'  # noqa
+        self.rpc_service.add(impl_GenomeFileUtil.ws_obj_gff_to_genome,
+                             name='GenomeFileUtil.ws_obj_gff_to_genome',
+                             types=[dict])
+        self.method_authentication['GenomeFileUtil.ws_obj_gff_to_genome'] = 'required'  # noqa
+        self.rpc_service.add(impl_GenomeFileUtil.ws_obj_gff_to_metagenome,
+                             name='GenomeFileUtil.ws_obj_gff_to_metagenome',
+                             types=[dict])
+        self.method_authentication['GenomeFileUtil.ws_obj_gff_to_metagenome'] = 'required'  # noqa
+        self.rpc_service.add(impl_GenomeFileUtil.update_taxon_assignments,
+                             name='GenomeFileUtil.update_taxon_assignments',
+                             types=[dict])
+        self.method_authentication['GenomeFileUtil.update_taxon_assignments'] = 'required'  # noqa
         self.rpc_service.add(impl_GenomeFileUtil.status,
                              name='GenomeFileUtil.status',
                              types=[dict])
